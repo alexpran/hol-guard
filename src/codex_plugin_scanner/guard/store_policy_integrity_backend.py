@@ -7,9 +7,13 @@ keyring secret into the owner-only local vault before either process uses it.
 
 from __future__ import annotations
 
+import base64
+import hmac
+import os
 import sys
 from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .store_base import (
     _POLICY_INTEGRITY_PRIMARY_SECRET_TIMEOUT_SECONDS,
@@ -22,6 +26,35 @@ from .store_base import (
 from .store_base import (
     _build_policy_integrity_secret_store as _base_policy_integrity_secret_store,
 )
+
+if TYPE_CHECKING:
+    from .store import GuardStore
+
+
+def _matches_native_authority(store: GuardStore, encoded_key: str | None) -> bool:
+    """Select an existing key only with authenticated, mutually consistent state."""
+
+    from .native_command_control_authority_io import read_private_state
+    from .native_command_control_authority_store import read_command_control_authority, read_native_control_floor
+    from .native_policy_snapshot_codec import derive_native_policy_verifier_key
+    from .native_policy_snapshot_constants import NATIVE_POLICY_VERIFIER_KEY_NAME, NativePolicySnapshotError
+
+    if encoded_key is None:
+        return False
+    try:
+        key = base64.urlsafe_b64decode(encoded_key.encode("ascii"))
+        if len(key) != 32:
+            return False
+        verifier = derive_native_policy_verifier_key(key)
+        if read_command_control_authority(store, verifier) is None:
+            return False
+        # Never select an old marker's key when the retained anti-rollback
+        # floor or resident verifier belongs to a different native identity.
+        read_native_control_floor(store, verifier)
+        persisted = read_private_state(store.guard_home, NATIVE_POLICY_VERIFIER_KEY_NAME, 32)
+        return persisted is None or hmac.compare_digest(persisted, verifier)
+    except (NativePolicySnapshotError, OSError, ValueError, UnicodeError):
+        return False
 
 
 class MirroredPolicyIntegritySecretStore(FallbackSecretStore):
@@ -48,6 +81,43 @@ class MirroredPolicyIntegritySecretStore(FallbackSecretStore):
             return self.fallback.get_secret(secret_id)
         except Exception:
             return None
+
+    def get_policy_key(self, secret_id: str, *, store: GuardStore) -> str | None:
+        """Do not overwrite the live native identity when a stale keyring returns."""
+
+        from .native_command_control_authority import AUTHORITY_FILE_NAME
+        from .native_policy_snapshot_constants import (
+            _RUST_SNAPSHOT_STATE_NAME,
+            NATIVE_POLICY_VERIFIER_KEY_NAME,
+            NATIVE_RUNTIME_STATE_DIRECTORY,
+        )
+
+        try:
+            primary_value = self._read_primary(secret_id)
+        except Exception:
+            primary_value = None
+        try:
+            fallback_value = self.fallback.get_secret(secret_id)
+        except Exception:
+            fallback_value = None
+        if primary_value is None:
+            return fallback_value
+        if primary_value == fallback_value:
+            return primary_value
+        state = store.guard_home / NATIVE_RUNTIME_STATE_DIRECTORY
+        armed = any(
+            os.path.lexists(state / name)
+            for name in (AUTHORITY_FILE_NAME, NATIVE_POLICY_VERIFIER_KEY_NAME, _RUST_SNAPSHOT_STATE_NAME)
+        )
+        if armed and not _matches_native_authority(store, primary_value):
+            if _matches_native_authority(store, fallback_value):
+                return fallback_value
+            # Neither candidate is proven. Preserve both copies for explicit
+            # recovery; normal authority verification still fails closed.
+            return primary_value
+        with suppress(Exception):
+            self.fallback.set_secret(secret_id, primary_value)
+        return primary_value
 
     def set_secret(self, secret_id: str, value: str) -> None:
         self.primary.set_secret(secret_id, value)

@@ -277,6 +277,10 @@ class StoreSecretPolicyIntegrityMixin:
         if secret_store is None:
             return None
         if isinstance(secret_store, MirroredPolicyIntegritySecretStore):
+            if secret_id == self._policy_integrity_key_ref:
+                from .store import GuardStore
+
+                return secret_store.get_policy_key(secret_id, store=cast(GuardStore, self))
             return secret_store.get_secret(secret_id)
         if isinstance(secret_store, FallbackSecretStore):
             fallback_value = self._get_secret_from_store(secret_store.fallback, secret_id)

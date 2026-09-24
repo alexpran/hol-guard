@@ -360,6 +360,8 @@ The action may need approval under your active policy, or its tools or artifacts
 
 ## Documentation
 
+For enrollment or stale native authority errors, see [extension-control recovery](docs/guard/extension-control-recovery.md).
+
 | Guide | Contents |
 | :--- | :--- |
 | [Get started](docs/guard/get-started.md) | Installation, manual setup, package protection, and common commands. |

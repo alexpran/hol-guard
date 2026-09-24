@@ -6,6 +6,8 @@ import argparse
 import contextlib
 import json
 import secrets
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import TextIO, cast
@@ -17,8 +19,9 @@ from ..approval_gate import (
 )
 from ..daemon.client import GuardDaemonRequestError, GuardSurfaceDaemonClient
 from ..daemon.runtime_peer import load_guard_daemon_endpoint
+from ..native_policy_snapshot_constants import NativePolicySnapshotError
 from ..runtime.command_extensions import BUILT_IN_COMMAND_EXTENSION_REGISTRY
-from ..runtime.extension_control_authority import ExtensionControlAuthorityError
+from ..runtime.extension_control_authority import AuthorityHealth, ExtensionControlAuthorityError
 from ..runtime.extension_control_proof import (
     ExtensionControlEnrollment,
     ExtensionControlProofError,
@@ -95,8 +98,19 @@ def _mutation_payload(effective: dict[str, object], args: argparse.Namespace) ->
     }
 
 
+def _recovery_command(guard_home: Path) -> str:
+    arguments = ["hol-guard", "command", "--guard-home", str(guard_home), "controls", "recover-authority"]
+    return subprocess.list2cmdline(arguments) if sys.platform == "win32" else shlex.join(arguments)
+
+
 def _enroll(guard_home: Path, actor: str, output_stream: TextIO | None) -> int:
     store = GuardStore(guard_home)
+    current = store.read_extension_control_authority(catalog_digest=BUILT_IN_COMMAND_EXTENSION_REGISTRY.catalog_digest)
+    if current.health is not AuthorityHealth.UNENROLLED:
+        raise ExtensionControlAuthorityError(
+            f"Extension-control authority is {current.health.value}; enrollment is only for a new authority. "
+            f"Authenticate recovery with: {_recovery_command(guard_home)}"
+        )
     enrollment = ExtensionControlEnrollment(
         catalog_digest=BUILT_IN_COMMAND_EXTENSION_REGISTRY.catalog_digest,
         actor_id=actor,
@@ -325,6 +339,23 @@ def run_extension_controls_command(
         payload["proof_id"] = proof_id
         _emit(client.apply_extension_controls(payload), output_stream)
         return 0
+    except NativePolicySnapshotError as error:
+        print(f"Error: native extension-control authority could not be verified ({error}).", file=sys.stderr)
+        if command == "recover-authority":
+            print(
+                "Recovery could not authenticate the retained native state. "
+                "Stop the Guard daemon for this guard home, restore access to the original "
+                "policy-integrity keyring or local vault, and retry. "
+                "Do not delete native authority, verifier, or rollback-floor files.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"Authenticate recovery with: {_recovery_command(guard_home)}\n"
+                "Recovery preserves verifiable controls and requires fresh approval; do not delete native state files.",
+                file=sys.stderr,
+            )
+        return 4
     except (
         ApprovalGateError,
         ExtensionControlAuthorityError,
