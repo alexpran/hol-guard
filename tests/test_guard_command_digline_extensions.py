@@ -92,23 +92,27 @@ DIGLINE_REVIEW_CASES: tuple[tuple[str, str, str], ...] = (
         "digline suite run command",
         _RUN_RULE,
     ),
+)
+
+# Forms the command parser does not yet normalize; each must stay uncertain for the stated reason.
+DIGLINE_UNCERTAIN_CASES: tuple[tuple[str, str], ...] = (
     (
         "exec digline promote --suite evals/suite.py --run 20260924T101500Z",
-        "digline baseline promotion command",
-        _PROMOTE_RULE,
+        "nested_command_executor_not_yet_supported",
     ),
     (
         "xargs -n 1 digline rejudge --suite evals/suite.py",
-        "digline rejudge command",
-        _REJUDGE_RULE,
+        "nested_command_executor_not_yet_supported",
     ),
 )
 
 
 def test_digline_rules_stay_inert_until_enabled(tmp_path: Path) -> None:
-    for command, _action_class, rule_id in DIGLINE_REVIEW_CASES:
+    commands = [command for command, _action_class, _rule_id in DIGLINE_REVIEW_CASES]
+    commands.extend(command for command, _reason in DIGLINE_UNCERTAIN_CASES)
+    for command in commands:
         evaluation = real_native_command_evaluation(command, cwd=tmp_path, home_dir=tmp_path).evaluation
-        assert evaluation.controlling_rule_id != rule_id
+        assert evaluation.controlling_rule_id not in _DIGLINE_RULES, command
         assert all(item.extension.extension_id != "command.digline" for item in evaluation.extension_observations)
 
 
@@ -120,9 +124,7 @@ def test_enabled_digline_writes_and_spending_reach_review(tmp_path: Path) -> Non
             home_dir=tmp_path,
             extension_control_layers=(enable_local_admin_extension_layer("command.digline"),),
         )
-        if evaluation.evaluation.command.confidence != "exact":
-            assert evaluation.evaluation.command.uncertainty_reason is not None
-            continue
+        assert evaluation.evaluation.command.confidence == "exact", command
         matched = {
             item.rule.rule_id
             for item in evaluation.evaluation.extension_observations
@@ -132,6 +134,18 @@ def test_enabled_digline_writes_and_spending_reach_review(tmp_path: Path) -> Non
         assert evaluation.evaluation.controlling_rule_id == rule_id, command
         assert any(item.match.action_class == action_class for item in evaluation.evaluation.matches), command
         assert evaluation.native_minimum_action == "review", command
+
+
+def test_enabled_digline_declared_uncertain_forms_stay_uncertain(tmp_path: Path) -> None:
+    for command, reason in DIGLINE_UNCERTAIN_CASES:
+        evaluation = real_native_command_evaluation(
+            command,
+            cwd=tmp_path,
+            home_dir=tmp_path,
+            extension_control_layers=(enable_local_admin_extension_layer("command.digline"),),
+        ).evaluation
+        assert evaluation.command.confidence != "exact", command
+        assert evaluation.command.uncertainty_reason == reason, command
 
 
 DIGLINE_SAFE_COMMANDS: tuple[str, ...] = (
