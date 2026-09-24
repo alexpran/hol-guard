@@ -33,6 +33,11 @@ DIGLINE_REVIEW_CASES: tuple[tuple[str, str, str], ...] = (
         _RUN_RULE,
     ),
     (
+        "digline run --suite evals/suite.py --resume 20260924T101500Z",
+        "digline suite run command",
+        _RUN_RULE,
+    ),
+    (
         "digline rejudge --suite evals/suite.py --run 20260924T101500Z",
         "digline rejudge command",
         _REJUDGE_RULE,
