@@ -6,8 +6,6 @@ import argparse
 import contextlib
 import json
 import secrets
-import shlex
-import subprocess
 import sys
 from pathlib import Path
 from typing import TextIO, cast
@@ -15,6 +13,7 @@ from typing import TextIO, cast
 from ..approval_gate import (
     ApprovalGateError,
     consume_extension_control_grant,
+    public_config,
     require_extension_control,
 )
 from ..daemon.client import GuardDaemonRequestError, GuardSurfaceDaemonClient
@@ -29,6 +28,7 @@ from ..runtime.extension_control_proof import (
 )
 from ..store import GuardStore
 from .approval_gate_prompt import prompt_for_approval_gate
+from .commands_support_prompts import _shell_join
 
 
 def _client(guard_home: Path) -> GuardSurfaceDaemonClient:
@@ -100,7 +100,7 @@ def _mutation_payload(effective: dict[str, object], args: argparse.Namespace) ->
 
 def _recovery_command(guard_home: Path) -> str:
     arguments = ["hol-guard", "command", "--guard-home", str(guard_home), "controls", "recover-authority"]
-    return subprocess.list2cmdline(arguments) if sys.platform == "win32" else shlex.join(arguments)
+    return _shell_join(arguments)
 
 
 def _enroll(guard_home: Path, actor: str, output_stream: TextIO | None) -> int:
@@ -152,8 +152,13 @@ def _recover_authority(
         guard_home,
         use_cooldown=False,
         summary=f"Authenticate extension-control authority {command}.",
+        require_fresh_totp=command == "recover-authority",
     )
     if command == "recover-authority":
+        if public_config(guard_home).totp_enabled and (gate_input is None or not gate_input.totp_code):
+            raise ApprovalGateError(
+                "approval_gate_totp_required", "Enter a fresh authenticator code for authority recovery."
+            )
         grant = require_extension_control(
             guard_home,
             approval_gate_input=gate_input,

@@ -210,3 +210,94 @@ def test_reenrollment_points_to_recovery_before_requesting_factors(
     assert "recover-authority" in error
     assert str(stale_home) in error
     assert "Traceback" not in error
+
+
+def test_recovery_rejects_a_forged_legacy_floor_without_replacing_the_marker(
+    stale_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.test_guard_policy_integrity_native_identity import _legacy_floor
+
+    path = stale_home / "native-runtime" / AUTHORITY_FILE_NAME
+    before = path.read_bytes()
+    encoded = _legacy_floor(stale_home, b"x" * 32)
+    result, output = _run(stale_home, "recover-authority")
+    assert result == 4
+    assert output == ""
+    assert "restore access" in capsys.readouterr().err
+    assert path.read_bytes() == before
+    assert (stale_home / "native-runtime" / "policy-snapshot-generation-floor.json").read_bytes() == encoded
+
+
+def test_recovery_command_quotes_custom_home_for_the_current_shell(tmp_path: Path) -> None:
+    import shlex
+    import subprocess
+    import sys
+
+    home = tmp_path / "guard home; not-a-command"
+    command = cli._recovery_command(home)
+    arguments = ["hol-guard", "command", "--guard-home", str(home), "controls", "recover-authority"]
+    if sys.platform.startswith("win"):
+        assert command == subprocess.list2cmdline(arguments)
+    else:
+        assert shlex.split(command) == arguments
+
+
+@pytest.mark.parametrize("supply_fresh_code", [False, True])
+def test_recovery_requires_explicit_totp_even_with_recent_session_approval(
+    stale_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], supply_fresh_code: bool
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    from urllib.parse import parse_qs, urlparse
+
+    from codex_plugin_scanner.guard import approval_gate
+    from codex_plugin_scanner.guard.cli import approval_gate_prompt
+    from codex_plugin_scanner.guard.totp import totp_code_at_counter
+
+    monkeypatch.setattr(approval_gate, "_current_totp_session_binding", lambda: "issue-3089-local-session")
+    now = datetime.now(timezone.utc)
+    enrollment_time = now - timedelta(seconds=90)
+    enrollment = approval_gate.begin_totp_enrollment(
+        stale_home,
+        approval_gate_input=ApprovalGateInput(password=PASSWORD),
+        device_label="recovery-test",
+        now=enrollment_time.isoformat(),
+    )
+    secret = parse_qs(urlparse(str(enrollment["otpauth_uri"])).query)["secret"][0]
+    enrollment_code = totp_code_at_counter(secret=secret, counter=int(enrollment_time.timestamp() // 30))
+    approval_gate.confirm_totp_enrollment(
+        stale_home,
+        approval_gate_input=ApprovalGateInput(password=PASSWORD, totp_code=enrollment_code),
+        now=enrollment_time.isoformat(),
+    )
+    fresh_code = totp_code_at_counter(secret=secret, counter=int(now.timestamp() // 30))
+    approval_gate.require_approval_decision(
+        stale_home,
+        action="allow",
+        scope="artifact",
+        subject="prime-recent-totp",
+        approval_gate_input=ApprovalGateInput(totp_code=fresh_code),
+        now=now.isoformat(),
+    )
+    assert approval_gate.public_config(stale_home).totp_recent_satisfied
+    marker = stale_home / "native-runtime" / AUTHORITY_FILE_NAME
+    before = marker.read_bytes()
+    prompts: list[str] = []
+    if supply_fresh_code:
+        monkeypatch.setattr(cli, "prompt_for_approval_gate", approval_gate_prompt.prompt_for_approval_gate)
+        monkeypatch.setattr(approval_gate_prompt.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(
+            approval_gate_prompt.getpass, "getpass", lambda prompt: prompts.append(prompt) or fresh_code
+        )
+    else:
+        monkeypatch.setattr(cli, "prompt_for_approval_gate", lambda *_args, **_kwargs: None)
+    result, output = _run(stale_home, "recover-authority")
+    if supply_fresh_code:
+        assert result == 0
+        assert '"health":"protected"' in output
+        assert len(prompts) == 1
+        assert "authenticator" in prompts[0].lower()
+    else:
+        assert result == 4
+        assert output == ""
+        assert "fresh authenticator code" in capsys.readouterr().err
+        assert marker.read_bytes() == before
